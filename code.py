@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 
 # -----------------------------
 # 1️⃣ Load your dataset
@@ -90,6 +91,28 @@ for i in range(5):
     x_i = X_test.iloc[i].values
     pred, prob = kernel_classify(X_train, y_train, x_i, weights, h)
     print(f"True: {y_test.iloc[i,0]}, Pred: {pred}, Probabilities: {prob}")
+
+
+# Predict on test set
+y_pred_test = []
+for i in range(len(X_test)):
+    x_i = X_test.iloc[i].values
+    pred, _ = kernel_classify(X_train, y_train, x_i, weights, h)
+    y_pred_test.append(pred)
+
+y_pred_test = np.array(y_pred_test)
+y_true_test = y_test.values.squeeze()
+
+# ✅ Compute accuracy
+acc = accuracy_score(y_true_test, y_pred_test)
+print(f"Test Accuracy: {acc:.4f}")
+
+# 🔍 Confusion matrix
+cm = confusion_matrix(y_true_test, y_pred_test)
+print("Confusion Matrix:\n", cm)
+
+# Detailed performance metrics
+print("\nClassification Report:\n", classification_report(y_true_test, y_pred_test))
 
 
 plt.figure(figsize=(6,6))
