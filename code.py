@@ -103,16 +103,9 @@ for i in range(len(X_test)):
 y_pred_test = np.array(y_pred_test)
 y_true_test = y_test.values.squeeze()
 
-# ✅ Compute accuracy
+# Compute accuracy
 acc = accuracy_score(y_true_test, y_pred_test)
 print(f"Test Accuracy: {acc:.4f}")
-
-# 🔍 Confusion matrix
-cm = confusion_matrix(y_true_test, y_pred_test)
-print("Confusion Matrix:\n", cm)
-
-# Detailed performance metrics
-print("\nClassification Report:\n", classification_report(y_true_test, y_pred_test))
 
 
 plt.figure(figsize=(6,6))
