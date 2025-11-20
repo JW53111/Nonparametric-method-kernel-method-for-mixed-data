@@ -5,6 +5,10 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 from scipy.optimize import minimize
 from scipy.integrate import simpson
 
+
+## 打个补丁 目前代码更改就是还是用这个数据库，但是考虑三种情况
+#1. acc,gyro total acc都视作functional，2.gyro变成subject_test的cts data
+#2. 思考还能加什么内容
 # -----------------------------
 # 1️⃣ Load your dataset
 # -----------------------------
