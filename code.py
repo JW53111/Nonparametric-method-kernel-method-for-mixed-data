@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from scipy.optimize import minimize
+from scipy.integrate import simpson
 
 # -----------------------------
 # 1️⃣ Load your dataset
@@ -21,69 +22,92 @@ X_test, y_test, subject_test = load_dataset("test")
 
 class MixedKernelClassifier:
     """
-    Implements the Selk–Gertheiss Weighted Kernel Method (WKM)
-    for mixed-type predictors: functional, categorical, continuous.
+    Implements Mixed-Type Weighted Kernel Method (WKM)
+    exactly following Selk & Gertheiss (2023) and your Section 3.2.2–3.2.4.
+
+    Supported covariates:
+        - functional curves (L2 integral metric)
+        - categorical variables (0/1 mismatch)
+        - continuous vector (Euclidean) with ONE weight
     """
 
-    def __init__(self, p_fun=0, p_cat=0, p_cts=0, kernel="gaussian"):
-        self.p_fun = p_fun
-        self.p_cat = p_cat
-        self.p_cts = p_cts
-        self.p = p_fun + p_cat + p_cts
+    def __init__(self, p_fun=0, p_cat=0, kernel="gaussian"):
+        self.p_fun = p_fun        # number of functional covariates
+        self.p_cat = p_cat        # number of categorical variables
+        self.p_cts = 1            # **one continuous component** per theory
+        self.p = p_fun + p_cat + 1
 
-        # weights
+        # weights (one per covariate block)
         self.omega = np.ones(self.p)
         self.h = 1.0
 
         if kernel == "gaussian":
             self.kernel = lambda d: np.exp(-(d ** 2) / (2 * self.h ** 2))
         else:
-            raise NotImplementedError("Only Gaussian kernel supported now.")
+            raise NotImplementedError("Only Gaussian kernel supported.")
+
+        self.fun_scale = None  # functional normalization scales
 
     # -------------------------------------------------------
-    # Distance functions
+    # 1. Functional L2 integral distance
     # -------------------------------------------------------
-    def d_fun(self, f1, f2):
-        return np.sqrt(np.sum((f1 - f2) ** 2))  # L2
+    def d_fun_raw(self, f1, f2):
+        """Raw L2 integral distance using Simpson's rule."""
+        dt = 1/50   # HAR sampling frequency = 50 Hz
+        diff_sq = (f1 - f2)**2
+        return np.sqrt(simpson(diff_sq, dx=dt))
 
+    def d_fun(self, f1, f2, j):
+        """Scaled functional distance."""
+        d = self.d_fun_raw(f1, f2)
+        return d / self.fun_scale[j]     # normalize for comparable weight learning
+
+    # -------------------------------------------------------
+    # 2. Categorical distance
+    # -------------------------------------------------------
     def d_cat(self, x1, x2):
         return 0.0 if x1 == x2 else 1.0
 
-    def d_cts(self, a, b):
-        return abs(a - b)
+    # -------------------------------------------------------
+    # 3. Continuous covariate distance: Euclidean
+    # -------------------------------------------------------
+    def d_cts(self, v1, v2):
+        return np.sqrt(np.sum((v1 - v2)**2))
 
-    # unified distance
+    # =======================================================
+    # UNIFIED WEIGHTED DISTANCE
+    # =======================================================
     def total_distance(self, x_i, x):
         """
-        x_i, x are dictionaries with:
+        x_i and x must be dicts:
         {
             'fun': list of arrays,
-            'cat': list of categorical values,
-            'cts': list (or np.array) of continuous values
+            'cat': list,
+            'cts': np.array([...])
         }
         """
         d_sum = 0.0
         idx = 0
 
-        # functional components
+        # functional block
         for j in range(self.p_fun):
-            d_sum += self.omega[idx] * self.d_fun(x_i['fun'][j], x['fun'][j])
+            d_sum += self.omega[idx] * self.d_fun(x_i['fun'][j], x['fun'][j], j)
             idx += 1
 
-        # categorical components
+        # categorical block
         for j in range(self.p_cat):
             d_sum += self.omega[idx] * self.d_cat(x_i['cat'][j], x['cat'][j])
             idx += 1
 
-        # continuous components
-        for j in range(self.p_cts):
-            d_sum += self.omega[idx] * self.d_cts(x_i['cts'][j], x['cts'][j])
-            idx += 1
+        # continuous block (ONE Euclidean)
+        d_cts = self.d_cts(x_i['cts'], x['cts'])
+        d_sum += self.omega[idx] * d_cts
+        idx += 1
 
         return d_sum
 
     # -------------------------------------------------------
-    # Kernel regression estimator
+    # Kernel regression estimator (used for LOOCV)
     # -------------------------------------------------------
     def kernel_estimator(self, X, y, x):
         distances = np.array([self.total_distance(X[i], x) for i in range(len(X))])
@@ -91,20 +115,16 @@ class MixedKernelClassifier:
         return np.sum(K * y) / np.sum(K)
 
     # -------------------------------------------------------
-    # LOOCV objective Q(ω,h)
+    # LOOCV loss Q(ω,h)
     # -------------------------------------------------------
     def LOOCV_loss(self, params, X, y):
         """
-        params = [log(omega_1), ..., log(omega_p), log(h)]
+        params = [log(omega_1), ... log(omega_p), log(h)]
+        Ensures omega_j > 0 and h > 0.
         """
-        # exponentiate to enforce positivity
-        logw = params[:-1]
-        logh = params[-1]
-
+        logw, logh = params[:-1], params[-1]
         self.omega = np.exp(logw)
         self.h = np.exp(logh)
-
-        # update kernel with new h
         self.kernel = lambda d: np.exp(-(d ** 2) / (2 * self.h ** 2))
 
         n = len(X)
@@ -115,53 +135,65 @@ class MixedKernelClassifier:
             y_loo = np.concatenate([y[:i], y[i+1:]])
 
             y_hat = self.kernel_estimator(X_loo, y_loo, X[i])
-            errors.append((y[i] - y_hat) ** 2)
+            errors.append((y[i] - y_hat)**2)
 
         return np.mean(errors)
 
     # -------------------------------------------------------
     # Fit model: estimate ω and h by LOOCV
     # -------------------------------------------------------
+    def compute_fun_scales(self, X):
+        """Compute median L2 distance for each functional variable."""
+        self.fun_scale = []
+        for j in range(self.p_fun):
+            dvals = []
+            # use small subset for speed
+            for i in range(30):
+                for k in range(30):
+                    dvals.append(self.d_fun_raw(X[i]['fun'][j], X[k]['fun'][j]))
+            self.fun_scale.append(max(np.median(dvals), 1e-6))
+
     def fit(self, X, y):
+        print("Computing functional scales...")
+        self.compute_fun_scales(X)
+
         init_params = np.zeros(self.p + 1)
+
+        print("Optimizing LOOCV...")
         res = minimize(lambda p: self.LOOCV_loss(p, X, y),
                        init_params, method="L-BFGS-B",
                        options={'maxiter': 50})
-        print("Optimal Parameters Found")
-        print("omega =", np.exp(res.x[:-1]))
-        print("h     =", np.exp(res.x[-1]))
 
         self.omega = np.exp(res.x[:-1])
         self.h = np.exp(res.x[-1])
         self.kernel = lambda d: np.exp(-(d ** 2) / (2 * self.h ** 2))
 
+        print("Optimal ω:", self.omega)
+        print("Optimal h:", self.h)
+
     # -------------------------------------------------------
-    # Classification (posterior probabilities)
+    # Probability and classification
     # -------------------------------------------------------
     def predict_class(self, X, y, x):
         classes = np.unique(y)
         probs = []
 
+        distances = np.array([self.total_distance(X[i], x) for i in range(len(X))])
+        K = self.kernel(distances)
+        Ksum = np.sum(K)
+
         for c in classes:
             mask = (y == c)
-
-            distances = np.array([self.total_distance(X[i], x) for i in range(len(X))])
-            K = self.kernel(distances)
-
-            prob = np.sum(K[mask]) / np.sum(K)
-            probs.append(prob)
+            probs.append(np.sum(K[mask]) / Ksum)
 
         probs = np.array(probs)
         return classes[np.argmax(probs)], probs
 
-    # -------------------------------------------------------
-    # Predict on test set
-    # -------------------------------------------------------
     def predict(self, X_train, y_train, X_test):
         preds = []
         for x in X_test:
-            pred, _ = self.predict_class(X_train, y_train, x)
-            preds.append(pred)
+            p, _ = self.predict_class(X_train, y_train, x)
+            preds.append(p)
         return np.array(preds)
     
 
