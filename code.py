@@ -1,203 +1,231 @@
 import numpy as np
 import pandas as pd
+import os
+from sklearn.model_selection import StratifiedShuffleSplit
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from scipy.optimize import minimize
 from scipy.integrate import simpson
 
-
-## 打个补丁 目前代码更改就是还是用这个数据库，但是考虑三种情况
-#1. acc,gyro total acc都视作functional，2.gyro变成subject_test的cts data
-#2. 思考还能加什么内容
+# Data process
 # -----------------------------
-# 1️⃣ Load your dataset
+# 1️⃣ Load your dataset from local
 # -----------------------------
-data_root = r"C:\Users\J\desktop\4th\Graduate-Project\UCI HAR Dataset"
+data_root = r"C:\Users\J\desktop\4th\Graduate-Project\Graduate-Project\UCI HAR Dataset"
 
-def load_dataset(split="train"):
-    base_path = f"{data_root}/{split}"
-    X = pd.read_csv(f"{base_path}/X_{split}.txt", sep=r"\s+", header=None)
-    y = pd.read_csv(f"{base_path}/y_{split}.txt", header=None, names=["Activity"])
-    subject = pd.read_csv(f"{base_path}/subject_{split}.txt", header=None, names=["Subject"])
-    return X, y, subject
-
-X_train, y_train, subject_train = load_dataset("train")
-X_test, y_test, subject_test = load_dataset("test")
-
-class MixedKernelClassifier:
+def load_har_mixed_dataset(split="train", n_samples=500, p_cts = 20):
     """
-    Implements Mixed-Type Weighted Kernel Method (WKM)
-    exactly following Selk & Gertheiss (2023) and your Section 3.2.2–3.2.4.
-
-    Supported covariates:
-        - functional curves (L2 integral metric)
-        - categorical variables (0/1 mismatch)
-        - continuous vector (Euclidean) with ONE weight
+    achieve mixed dataset:
+    - Functional (9 signals)
+    - Categorical (subject ID)
+    - Continuous (first p_cts features)
     """
 
-    def __init__(self, p_fun=0, p_cat=0, kernel="gaussian"):
-        self.p_fun = p_fun        # number of functional covariates
-        self.p_cat = p_cat        # number of categorical variables
-        self.p_cts = 1            # **one continuous component** per theory
-        self.p = p_fun + p_cat + 1
+    base_path = os.path.join(data_root, split)
+    
+    # Load y of continous variable and subject(volunteer ID) 
+    y = pd.read_csv(os.path.join(base_path, f"y_{split}.txt"), header=None)[0].values
+    subjects = pd.read_csv(os.path.join(base_path, f"subject_{split}.txt"), header=None)[0].values
+    
+    # Stratified Sampling(randomly choose sampling from dataset分层抽样)
+    sss = StratifiedShuffleSplit(n_splits=1, train_size=n_samples, random_state=42)
+    indices, _ = next(sss.split(np.zeros(len(y)), y))
+    
+    y_sampled = y[indices]
+    subject_sampled = subjects[indices]
+    
+    # choose cts variables(X_train.txt front p_cts column)
+    # Feature Screening
+    X_cts_full = pd.read_csv(os.path.join(base_path, f"X_{split}.txt"), sep=r"\s+", header=None)
+    X_cts_sampled = X_cts_full.iloc[indices, :p_cts].values
+    
+    # choose functional variables (Inertial Signals)
+    # every signals is a (n_samples, 128) matrix
+    signal_names = [
+        'total_acc_x', 'total_acc_y', 'total_acc_z', 
+        'body_acc_x', 'body_acc_y', 'body_acc_z',
+        'body_gyro_x', 'body_gyro_y', 'body_gyro_z'
+    ]
+    
+    X_fun_sampled = []
+    for sig in signal_names:
+        sig_path = os.path.join(base_path, "Inertial Signals", f"{sig}_{split}.txt")
+        sig_data = pd.read_csv(sig_path, sep=r"\s+", header=None).values
+        X_fun_sampled.append(sig_data[indices]) 
+        
 
-        # weights (one per covariate block)
-        self.omega = np.ones(self.p)
+    # fixed Mixed-Type dict, for easy improt kernel fucntion 
+    mixed_data_list = []
+    for i in range(len(indices)):
+        mixed_data_list.append({
+            'fun': [X_fun_sampled[j][i] for j in range(9)], # p_fun (9 original signals)
+            'cat': [subject_sampled[i]],                   # p_cat (Subject ID)
+            'cts': X_cts_sampled[i]                         # p_cts
+        })
+        
+    print(f"Sampling (n): {len(mixed_data_list)}")
+    print(f"variables composed: 9 Functional, 1 Categorical, {p_cts} Continuous")
+    
+    return mixed_data_list, y_sampled
+
+# Kernel Smoothing Method
+class MixedWeightedKernelClassifier:
+    """
+    完全基于论文 Eq.(22) 实现的混合核分类器
+    针对 HAR 数据集：9个函数型, 1个类别型, 20/50个连续型
+    """
+    def __init__(self, p_fun=9, p_cat=1, p_cts=20):
+        self.p_fun = p_fun
+        self.p_cat = p_cat
+        self.p_cts = p_cts
+        self.p_total = p_fun + p_cat + p_cts
+        
+        # 待优化参数: 每一个分量都有一个权重 omega_j，以及一个全局带宽 h
+        self.omega = np.ones(self.p_total)
         self.h = 1.0
+        
+        # 缩放因子（用于保持数值稳定性）
+        self.scales = np.ones(self.p_total)
 
-        if kernel == "gaussian":
-            self.kernel = lambda d: np.exp(-(d ** 2) / (2 * self.h ** 2))
-        else:
-            raise NotImplementedError("Only Gaussian kernel supported.")
+    def _d_fun_sq(self, f1, f2):
+        """函数型数据的 L2 距离平方: \int (f1-f2)^2 dt"""
+        dt = 1/50 
+        return simpson((f1 - f2)**2, dx=dt)
 
-        self.fun_scale = None  # functional normalization scales
-
-    # -------------------------------------------------------
-    # 1. Functional L2 integral distance
-    # -------------------------------------------------------
-    def d_fun_raw(self, f1, f2):
-        """Raw L2 integral distance using Simpson's rule."""
-        dt = 1/50   # HAR sampling frequency = 50 Hz
-        diff_sq = (f1 - f2)**2
-        return np.sqrt(simpson(diff_sq, dx=dt))
-
-    def d_fun(self, f1, f2, j):
-        """Scaled functional distance."""
-        d = self.d_fun_raw(f1, f2)
-        return d / self.fun_scale[j]     # normalize for comparable weight learning
-
-    # -------------------------------------------------------
-    # 2. Categorical distance
-    # -------------------------------------------------------
-    def d_cat(self, x1, x2):
-        return 0.0 if x1 == x2 else 1.0
-
-    # -------------------------------------------------------
-    # 3. Continuous covariate distance: Euclidean
-    # -------------------------------------------------------
-    def d_cts(self, v1, v2):
-        return np.sqrt(np.sum((v1 - v2)**2))
-
-    # =======================================================
-    # UNIFIED WEIGHTED DISTANCE
-    # =======================================================
-    def total_distance(self, x_i, x):
+    def _compute_all_distances_sq(self, x1, x2):
         """
-        x_i and x must be dicts:
-        {
-            'fun': list of arrays,
-            'cat': list,
-            'cts': np.array([...])
-        }
+        计算 Eq.(22) 中涉及的所有维度的距离平方或度量
+        返回一个长度为 p_total 的向量
         """
-        d_sum = 0.0
-        idx = 0
-
-        # functional block
+        d_sq_vec = np.zeros(self.p_total)
+        
+        # 1. Functional (L2 distance squared)
         for j in range(self.p_fun):
-            d_sum += self.omega[idx] * self.d_fun(x_i['fun'][j], x['fun'][j], j)
-            idx += 1
-
-        # categorical block
+            d_sq_vec[j] = self._d_fun_sq(x1['fun'][j], x2['fun'][j])
+            
+        # 2. Categorical (Indicator distance: 0 if equal, 1 if not)
+        # 注意：类别变量通常在核函数中直接体现，这里取其平方以保持一致性
         for j in range(self.p_cat):
-            d_sum += self.omega[idx] * self.d_cat(x_i['cat'][j], x['cat'][j])
-            idx += 1
+            d_sq_vec[self.p_fun + j] = 1.0 if x1['cat'][j] != x2['cat'][j] else 0.0
+            
+        # 3. Continuous (Euclidean squared)
+        for j in range(self.p_cts):
+            d_sq_vec[self.p_fun + self.p_cat + j] = (x1['cts'][j] - x2['cts'][j])**2
+            
+        return d_sq_vec
 
-        # continuous block (ONE Euclidean)
-        d_cts = self.d_cts(x_i['cts'], x['cts'])
-        d_sum += self.omega[idx] * d_cts
-        idx += 1
+    def _set_scales(self, X):
+        """初始化缩放因子，使各分量初始距离在同一量级，便于优化"""
+        temp_dists = []
+        for _ in range(50): # 随机采样 50 对计算中位数
+            i, k = np.random.choice(len(X), 2)
+            temp_dists.append(self._compute_all_distances_sq(X[i], X[k]))
+        self.scales = np.median(np.array(temp_dists), axis=0) + 1e-6
 
-        return d_sum
-
-    # -------------------------------------------------------
-    # Kernel regression estimator (used for LOOCV)
-    # -------------------------------------------------------
-    def kernel_estimator(self, X, y, x):
-        distances = np.array([self.total_distance(X[i], x) for i in range(len(X))])
-        K = self.kernel(distances)
-        return np.sum(K * y) / np.sum(K)
-
-    # -------------------------------------------------------
-    # LOOCV loss Q(ω,h)
-    # -------------------------------------------------------
-    def LOOCV_loss(self, params, X, y):
+    def _calculate_weights(self, X_train, x_target):
         """
-        params = [log(omega_1), ... log(omega_p), log(h)]
-        Ensures omega_j > 0 and h > 0.
+        核心实现 Eq.(22): 计算核权重 W_i
+        W_i = exp( - sum(omega_j * d_ij^2) / (2 * h^2) )
         """
-        logw, logh = params[:-1], params[-1]
-        self.omega = np.exp(logw)
-        self.h = np.exp(logh)
-        self.kernel = lambda d: np.exp(-(d ** 2) / (2 * self.h ** 2))
+        # 计算目标样本与训练集所有样本的距离向量
+        # 形状: (n_train, p_total)
+        diff_matrix_sq = np.array([self._compute_all_distances_sq(x_tr, x_target) for x_tr in X_train])
+        
+        # 归一化距离
+        norm_diff_sq = diff_matrix_sq / self.scales
+        
+        # 加权求和: sum(omega * d^2)
+        weighted_sq_dist = np.dot(norm_diff_sq, self.omega)
+        
+        # 高斯映射
+        ker_weights = np.exp(-weighted_sq_dist / (2 * self.h**2))
+        return ker_weights
 
+    def loocv_loss(self, params, X, y):
+        """LOOCV 目标函数"""
+        self.omega = np.exp(params[:-1]) # 保证权重为正
+        self.h = np.exp(params[-1])     # 保证带宽为正
+        
         n = len(X)
-        errors = []
-
+        errors = 0
         for i in range(n):
+            # 排除当前样本
             X_loo = X[:i] + X[i+1:]
             y_loo = np.concatenate([y[:i], y[i+1:]])
-
-            y_hat = self.kernel_estimator(X_loo, y_loo, X[i])
-            errors.append((y[i] - y_hat)**2)
-
-        return np.mean(errors)
-
-    # -------------------------------------------------------
-    # Fit model: estimate ω and h by LOOCV
-    # -------------------------------------------------------
-    def compute_fun_scales(self, X):
-        """Compute median L2 distance for each functional variable."""
-        self.fun_scale = []
-        for j in range(self.p_fun):
-            dvals = []
-            # use small subset for speed
-            for i in range(30):
-                for k in range(30):
-                    dvals.append(self.d_fun_raw(X[i]['fun'][j], X[k]['fun'][j]))
-            self.fun_scale.append(max(np.median(dvals), 1e-6))
+            
+            w = self._calculate_weights(X_loo, X[i])
+            
+            if np.sum(w) < 1e-10:
+                y_hat = np.mean(y_loo)
+            else:
+                y_hat = np.dot(w, y_loo) / np.sum(w)
+            
+            errors += (y[i] - y_hat)**2
+        return errors / n
 
     def fit(self, X, y):
-        print("Computing functional scales...")
-        self.compute_fun_scales(X)
+        self._set_scales(X)
+        n = len(X)
+        print(f"Step 1: Pre-computing distance matrix for {n} samples...")
+        
+        # --- 核心优化：预计算 ---
+        # 预先算出所有样本对在所有维度上的距离平方
+        # matrix 形状: (n, n, p_total)
+        dist_matrix_sq = np.zeros((n, n, self.p_total))
+        for i in range(n):
+            for k in range(i + 1, n):
+                d_sq = self._compute_all_distances_sq(X[i], X[k])
+                dist_matrix_sq[i, k] = d_sq
+                dist_matrix_sq[k, i] = d_sq # 对称性
+        
+        # 归一化
+        dist_matrix_sq /= self.scales
+        
+        print("Step 2: Starting optimization (Fast Mode)...")
+        init_p = np.zeros(self.p_total + 1)
+        
+        # 修改后的 Loss 函数，直接查表，不再重算积分
+        def fast_loocv(params):
+            omega = np.exp(params[:-1])
+            h_sq = np.exp(params[-1])**2 * 2
+            
+            # 矩阵运算：(n, n, p) * (p,) -> (n, n)
+            weighted_dists = np.dot(dist_matrix_sq, omega)
+            K = np.exp(-weighted_dists / h_sq)
+            
+            # 排除对角线 (Leave-one-out)
+            np.fill_diagonal(K, 0)
+            
+            # 计算 y_hat
+            sum_K = np.sum(K, axis=1)
+            # 防止除以 0
+            sum_K[sum_K < 1e-10] = 1.0
+            y_hat = np.dot(K, y) / sum_K
+            
+            return np.mean((y - y_hat)**2)
 
-        init_params = np.zeros(self.p + 1)
-
-        print("Optimizing LOOCV...")
-        res = minimize(lambda p: self.LOOCV_loss(p, X, y),
-                       init_params, method="L-BFGS-B",
-                       options={'maxiter': 50})
-
+        res = minimize(fast_loocv, init_p, method='L-BFGS-B', options={'maxiter': 50})
+        
         self.omega = np.exp(res.x[:-1])
         self.h = np.exp(res.x[-1])
-        self.kernel = lambda d: np.exp(-(d ** 2) / (2 * self.h ** 2))
-
-        print("Optimal ω:", self.omega)
-        print("Optimal h:", self.h)
-
-    # -------------------------------------------------------
-    # Probability and classification
-    # -------------------------------------------------------
-    def predict_class(self, X, y, x):
-        classes = np.unique(y)
-        probs = []
-
-        distances = np.array([self.total_distance(X[i], x) for i in range(len(X))])
-        K = self.kernel(distances)
-        Ksum = np.sum(K)
-
-        for c in classes:
-            mask = (y == c)
-            probs.append(np.sum(K[mask]) / Ksum)
-
-        probs = np.array(probs)
-        return classes[np.argmax(probs)], probs
+        print("Optimization Complete.")
 
     def predict(self, X_train, y_train, X_test):
         preds = []
         for x in X_test:
-            p, _ = self.predict_class(X_train, y_train, x)
-            preds.append(p)
+            w = self._calculate_weights(X_train, x)
+            y_hat = np.dot(w, y_train) / np.sum(w)
+            preds.append(y_hat)
         return np.array(preds)
-    
 
+
+
+# 实验 1: 使用 20 个特征
+X_20, y_20 = load_har_mixed_dataset(p_cts=20, n_samples=500)
+model20 =  MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=20)
+model20.fit(X_20, y_20)
+
+# 实验 2: 使用 50 个特征(暂时不用)
+#X_50, y_50 = load_har_mixed_dataset(p_cts=50, n_samples=500)
+#model50 =  MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=50)
+#model50.fit(X_50, y_50)
