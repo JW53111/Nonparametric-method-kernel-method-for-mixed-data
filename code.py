@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import time
 import os
 from sklearn.model_selection import StratifiedShuffleSplit
 import matplotlib.pyplot as plt
@@ -220,12 +221,95 @@ class MixedWeightedKernelClassifier:
 
 
 
-# 实验 1: 使用 20 个特征
-X_20, y_20 = load_har_mixed_dataset(p_cts=20, n_samples=500)
-model20 =  MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=20)
-model20.fit(X_20, y_20)
+def run_full_sensitivity_analysis():
+    # --- 实验配置 ---
+    p_cts_list = [20, 50, 100]
+    n_train_list = [500, 1000, 2000, 3000]
+    n_test_list = [500, 1000, 1500] # 新增：测试集梯度
+    
+    test_results = []
 
-# 实验 2: 使用 50 个特征(暂时不用)
-#X_50, y_50 = load_har_mixed_dataset(p_cts=50, n_samples=500)
-#model50 =  MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=50)
-#model50.fit(X_50, y_50)
+    # ---------------------------------------------------------
+    # 实验 A: 改变特征维度 p_cts (固定 n_train=500, n_test=500)
+    # ---------------------------------------------------------
+    print("\n" + "="*50 + "\n实验 A: 改变 p_cts\n" + "="*50)
+    for p in p_cts_list:
+        X_tr, y_tr = load_har_mixed_dataset(split="train", n_samples=500, p_cts=p)
+        X_te, y_te = load_har_mixed_dataset(split="test", n_samples=500, p_cts=p)
+        
+        model = MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=p)
+        start = time.time()
+        model.fit(X_tr, y_tr)
+        t = time.time() - start
+        
+        y_hat = model.predict(X_tr, y_tr, X_te)
+        acc = accuracy_score(y_te, np.clip(np.round(y_hat), 1, 6))
+        test_results.append({'Type': 'Var_P', 'n_train': 500, 'n_test': 500, 'p': p, 'Accuracy': acc, 'Time': t})
+        print(f"p={p}: Acc={acc:.4f}")
+
+    # ---------------------------------------------------------
+    # 实验 B: 改变训练量 n_train (固定 p_cts=20, n_test=500)
+    # ---------------------------------------------------------
+    print("\n" + "="*50 + "\n实验 B: 改变 n_train\n" + "="*50)
+    for n in n_train_list:
+        X_tr, y_tr = load_har_mixed_dataset(split="train", n_samples=n, p_cts=20)
+        X_te, y_te = load_har_mixed_dataset(split="test", n_samples=500, p_cts=20)
+        
+        model = MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=20)
+        start = time.time()
+        model.fit(X_tr, y_tr)
+        t = time.time() - start
+        
+        y_hat = model.predict(X_tr, y_tr, X_te)
+        acc = accuracy_score(y_te, np.clip(np.round(y_hat), 1, 6))
+        test_results.append({'Type': 'Var_N_Train', 'n_train': n, 'n_test': 500, 'p': 20, 'Accuracy': acc, 'Time': t})
+        print(f"n_train={n}: Acc={acc:.4f}")
+
+    # ---------------------------------------------------------
+    # 实验 C: 改变测试量 n_test (固定 n_train=2000, p_cts=20)
+    # ---------------------------------------------------------
+    print("\n" + "="*50 + "\n实验 C: 改变 n_test\n" + "="*50)
+    # 预先训练好固定模型，节省时间
+    X_tr_fixed, y_tr_fixed = load_har_mixed_dataset(split="train", n_samples=2000, p_cts=20)
+    model_fixed = MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=20)
+    model_fixed.fit(X_tr_fixed, y_tr_fixed)
+
+    for nt in n_test_list:
+        X_te, y_te = load_har_mixed_dataset(split="test", n_samples=nt, p_cts=20)
+        start_pred = time.time()
+        y_hat = model_fixed.predict(X_tr_fixed, y_tr_fixed, X_te)
+        pred_t = time.time() - start_pred
+        
+        acc = accuracy_score(y_te, np.clip(np.round(y_hat), 1, 6))
+        test_results.append({'Type': 'Var_N_Test', 'n_train': 2000, 'n_test': nt, 'p': 20, 'Accuracy': acc, 'Time': pred_t})
+        print(f"n_test={nt}: Acc={acc:.4f}, PredTime={pred_t:.2f}s")
+
+    return pd.DataFrame(test_results)
+
+def plot_full_sensitivity(df):
+    plt.figure(figsize=(18, 5))
+    
+    # 1. p_cts 影响
+    plt.subplot(1, 3, 1)
+    sub = df[df['Type'] == 'Var_P']
+    plt.plot(sub['p'], sub['Accuracy'], marker='o')
+    plt.title('Impact of Features (p_cts)')
+    plt.xlabel('Number of Features')
+    plt.ylabel('Accuracy')
+
+    # 2. n_train 影响 (学习曲线)
+    plt.subplot(1, 3, 2)
+    sub = df[df['Type'] == 'Var_N_Train']
+    plt.plot(sub['n_train'], sub['Accuracy'], marker='s', color='r')
+    plt.title('Learning Curve (n_train)')
+    plt.xlabel('Training Samples')
+
+    # 3. n_test 影响 (评估稳定性)
+    plt.subplot(1, 3, 3)
+    sub = df[df['Type'] == 'Var_N_Test']
+    plt.plot(sub['n_test'], sub['Accuracy'], marker='^', color='g')
+    plt.title('Evaluation Stability (n_test)')
+    plt.xlabel('Test Samples')
+
+    plt.tight_layout()
+    plt.show()
