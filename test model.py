@@ -8,8 +8,8 @@ from code import MixedWeightedKernelClassifier, load_har_mixed_dataset
 def run_comparison_experiments():
     # --- 1. 定义实验梯度 ---
     p_scenarios = [20, 50, 100]
-    n_train_scenarios = [500, 1000, 2000, 3000]
-    n_test_scenarios = [500, 1000, 1500] # 新增测试集梯度
+    n_train_scenarios = [500, 1000, 1500, 2000]
+    n_test_scenarios = [200, 500, 800] # 新增测试集梯度
     
     results = []
 
