@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 from scipy.optimize import minimize
 from scipy.integrate import simpson
+from numba import njit
 
 # Data process
 # -----------------------------
@@ -14,34 +15,41 @@ from scipy.integrate import simpson
 # -----------------------------
 data_root = r"C:\Users\J\desktop\4th\Graduate-Project\Graduate-Project\UCI HAR Dataset"
 
-def load_har_mixed_dataset(split="train", n_samples=500, p_cts = 20):
+def load_har_mixed_dataset(split="train", n_samples=500, p_cts=20, step=3):
     """
-    achieve mixed dataset:
-    - Functional (9 signals)
-    - Categorical (subject ID)
-    - Continuous (first p_cts features)
+    改进版数据加载：
+    1. 通过 step 间隔采样打破时间序列自相关性 (IID 假设)
+    2. 通过 StratifiedShuffleSplit 确保类别平衡
     """
-
     base_path = os.path.join(data_root, split)
     
-    # Load y of continous variable and subject(volunteer ID) 
-    y = pd.read_csv(os.path.join(base_path, f"y_{split}.txt"), header=None)[0].values
-    subjects = pd.read_csv(os.path.join(base_path, f"subject_{split}.txt"), header=None)[0].values
+    # --- 1. 加载所有标签和主体 ID ---
+    y_full = pd.read_csv(os.path.join(base_path, f"y_{split}.txt"), header=None)[0].values
+    subjects_full = pd.read_csv(os.path.join(base_path, f"subject_{split}.txt"), header=None)[0].values
     
-    # Stratified Sampling(randomly choose sampling from dataset分层抽样)
-    sss = StratifiedShuffleSplit(n_splits=1, train_size=n_samples, random_state=42)
-    indices, _ = next(sss.split(np.zeros(len(y)), y))
+    # --- 2. IID 预处理：等间距跳点采样 ---
+    # 假设每秒 50Hz, 窗口 128 点，重叠 64 点。跳 3 个窗口约等于跳过 4 秒的数据
+    indices_iid = np.arange(0, len(y_full), step)
+    y_iid = y_full[indices_iid]
     
-    y_sampled = y[indices]
-    subject_sampled = subjects[indices]
+    # --- 3. 分层抽样：确保 1-6 类分布均匀 ---
+    actual_n = min(n_samples, len(y_iid))
+    sss = StratifiedShuffleSplit(n_splits=1, train_size=actual_n, random_state=42)
     
-    # choose cts variables(X_train.txt front p_cts column)
-    # Feature Screening
+    # 这里的 rel_indices 是相对于 indices_iid 的索引
+    rel_indices, _ = next(sss.split(np.zeros(len(y_iid)), y_iid))
+    # 映射回原始数据的全局索引
+    final_indices = indices_iid[rel_indices]
+    
+    # --- 4. 根据 final_indices 提取数据 ---
+    y_sampled = y_full[final_indices]
+    subject_sampled = subjects_full[final_indices]
+    
+    # 连续变量提取
     X_cts_full = pd.read_csv(os.path.join(base_path, f"X_{split}.txt"), sep=r"\s+", header=None)
-    X_cts_sampled = X_cts_full.iloc[indices, :p_cts].values
+    X_cts_sampled = X_cts_full.iloc[final_indices, :p_cts].values
     
-    # choose functional variables (Inertial Signals)
-    # every signals is a (n_samples, 128) matrix
+    # 函数型变量（惯性信号）提取
     signal_names = [
         'total_acc_x', 'total_acc_y', 'total_acc_z', 
         'body_acc_x', 'body_acc_y', 'body_acc_z',
@@ -51,23 +59,63 @@ def load_har_mixed_dataset(split="train", n_samples=500, p_cts = 20):
     X_fun_sampled = []
     for sig in signal_names:
         sig_path = os.path.join(base_path, "Inertial Signals", f"{sig}_{split}.txt")
+        # 优化：只读取需要的行，节省内存
         sig_data = pd.read_csv(sig_path, sep=r"\s+", header=None).values
-        X_fun_sampled.append(sig_data[indices]) 
-        
+        X_fun_sampled.append(sig_data[final_indices])
 
-    # fixed Mixed-Type dict, for easy improt kernel fucntion 
+    # --- 5. 组装成混合类型列表 ---
     mixed_data_list = []
-    for i in range(len(indices)):
+    for i in range(len(final_indices)):
         mixed_data_list.append({
-            'fun': [X_fun_sampled[j][i] for j in range(9)], # p_fun (9 original signals)
-            'cat': [subject_sampled[i]],                   # p_cat (Subject ID)
-            'cts': X_cts_sampled[i]                         # p_cts
+            'fun': [X_fun_sampled[j][i] for j in range(9)],
+            'cat': [subject_sampled[i]],
+            'cts': X_cts_sampled[i]
         })
         
-    print(f"Sampling (n): {len(mixed_data_list)}")
-    print(f"variables composed: 9 Functional, 1 Categorical, {p_cts} Continuous")
+    print(f"--- data loading({split}) ---")
+    print(f"original: {len(y_full)} | IID : {len(y_iid)} | final samping: {actual_n}")
+    print(f"variable: 9 Functional, 1 Categorical, {p_cts} Continuous")
     
     return mixed_data_list, y_sampled
+
+@njit
+def fast_simpson_numba(y, dx):
+    """Numba 加速的辛普森积分"""
+    n = len(y)
+    res = y[0] + y[-1]
+    for i in range(1, n-1, 2):
+        res += 4 * y[i]
+    for i in range(2, n-2, 2):
+        res += 2 * y[i]
+    return (dx / 3.0) * res
+
+@njit(parallel=True)
+def precompute_dist_matrix_numba(X_fun, X_cat, X_cts, scales, p_fun, p_cat, p_cts):
+    """并行预计算距离矩阵：O(n^2 * p)"""
+    n = X_fun.shape[0]
+    p_total = p_fun + p_cat + p_cts
+    dist_matrix = np.zeros((n, n, p_total))
+    dx = 1.0/50.0
+
+    for i in range(n):
+        for k in range(i + 1, n):
+            # 1. Functional
+            for j in range(p_fun):
+                diff_sq = (X_fun[i, j] - X_fun[k, j])**2
+                dist_matrix[i, k, j] = fast_simpson_numba(diff_sq, dx)
+            # 2. Categorical
+            for j in range(p_cat):
+                dist_matrix[i, k, p_fun + j] = 1.0 if X_cat[i, j] != X_cat[k, j] else 0.0
+            # 3. Continuous
+            for j in range(p_cts):
+                dist_matrix[i, k, p_fun + p_cat + j] = (X_cts[i, j] - X_cts[k, j])**2
+            
+            # 对称填充并应用缩放
+            for j in range(p_total):
+                val = dist_matrix[i, k, j] / scales[j]
+                dist_matrix[i, k, j] = val
+                dist_matrix[k, i, j] = val
+    return dist_matrix
 
 # Kernel Smoothing Method
 class MixedWeightedKernelClassifier:
@@ -221,95 +269,3 @@ class MixedWeightedKernelClassifier:
 
 
 
-def run_full_sensitivity_analysis():
-    # --- 实验配置 ---
-    p_cts_list = [20, 50, 100]
-    n_train_list = [500, 1000, 2000, 3000]
-    n_test_list = [500, 1000, 1500] # 新增：测试集梯度
-    
-    test_results = []
-
-    # ---------------------------------------------------------
-    # 实验 A: 改变特征维度 p_cts (固定 n_train=500, n_test=500)
-    # ---------------------------------------------------------
-    print("\n" + "="*50 + "\n实验 A: 改变 p_cts\n" + "="*50)
-    for p in p_cts_list:
-        X_tr, y_tr = load_har_mixed_dataset(split="train", n_samples=500, p_cts=p)
-        X_te, y_te = load_har_mixed_dataset(split="test", n_samples=500, p_cts=p)
-        
-        model = MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=p)
-        start = time.time()
-        model.fit(X_tr, y_tr)
-        t = time.time() - start
-        
-        y_hat = model.predict(X_tr, y_tr, X_te)
-        acc = accuracy_score(y_te, np.clip(np.round(y_hat), 1, 6))
-        test_results.append({'Type': 'Var_P', 'n_train': 500, 'n_test': 500, 'p': p, 'Accuracy': acc, 'Time': t})
-        print(f"p={p}: Acc={acc:.4f}")
-
-    # ---------------------------------------------------------
-    # 实验 B: 改变训练量 n_train (固定 p_cts=20, n_test=500)
-    # ---------------------------------------------------------
-    print("\n" + "="*50 + "\n实验 B: 改变 n_train\n" + "="*50)
-    for n in n_train_list:
-        X_tr, y_tr = load_har_mixed_dataset(split="train", n_samples=n, p_cts=20)
-        X_te, y_te = load_har_mixed_dataset(split="test", n_samples=500, p_cts=20)
-        
-        model = MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=20)
-        start = time.time()
-        model.fit(X_tr, y_tr)
-        t = time.time() - start
-        
-        y_hat = model.predict(X_tr, y_tr, X_te)
-        acc = accuracy_score(y_te, np.clip(np.round(y_hat), 1, 6))
-        test_results.append({'Type': 'Var_N_Train', 'n_train': n, 'n_test': 500, 'p': 20, 'Accuracy': acc, 'Time': t})
-        print(f"n_train={n}: Acc={acc:.4f}")
-
-    # ---------------------------------------------------------
-    # 实验 C: 改变测试量 n_test (固定 n_train=2000, p_cts=20)
-    # ---------------------------------------------------------
-    print("\n" + "="*50 + "\n实验 C: 改变 n_test\n" + "="*50)
-    # 预先训练好固定模型，节省时间
-    X_tr_fixed, y_tr_fixed = load_har_mixed_dataset(split="train", n_samples=2000, p_cts=20)
-    model_fixed = MixedWeightedKernelClassifier(p_fun=9, p_cat=1, p_cts=20)
-    model_fixed.fit(X_tr_fixed, y_tr_fixed)
-
-    for nt in n_test_list:
-        X_te, y_te = load_har_mixed_dataset(split="test", n_samples=nt, p_cts=20)
-        start_pred = time.time()
-        y_hat = model_fixed.predict(X_tr_fixed, y_tr_fixed, X_te)
-        pred_t = time.time() - start_pred
-        
-        acc = accuracy_score(y_te, np.clip(np.round(y_hat), 1, 6))
-        test_results.append({'Type': 'Var_N_Test', 'n_train': 2000, 'n_test': nt, 'p': 20, 'Accuracy': acc, 'Time': pred_t})
-        print(f"n_test={nt}: Acc={acc:.4f}, PredTime={pred_t:.2f}s")
-
-    return pd.DataFrame(test_results)
-
-def plot_full_sensitivity(df):
-    plt.figure(figsize=(18, 5))
-    
-    # 1. p_cts 影响
-    plt.subplot(1, 3, 1)
-    sub = df[df['Type'] == 'Var_P']
-    plt.plot(sub['p'], sub['Accuracy'], marker='o')
-    plt.title('Impact of Features (p_cts)')
-    plt.xlabel('Number of Features')
-    plt.ylabel('Accuracy')
-
-    # 2. n_train 影响 (学习曲线)
-    plt.subplot(1, 3, 2)
-    sub = df[df['Type'] == 'Var_N_Train']
-    plt.plot(sub['n_train'], sub['Accuracy'], marker='s', color='r')
-    plt.title('Learning Curve (n_train)')
-    plt.xlabel('Training Samples')
-
-    # 3. n_test 影响 (评估稳定性)
-    plt.subplot(1, 3, 3)
-    sub = df[df['Type'] == 'Var_N_Test']
-    plt.plot(sub['n_test'], sub['Accuracy'], marker='^', color='g')
-    plt.title('Evaluation Stability (n_test)')
-    plt.xlabel('Test Samples')
-
-    plt.tight_layout()
-    plt.show()
