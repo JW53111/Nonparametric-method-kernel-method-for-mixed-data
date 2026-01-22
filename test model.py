@@ -80,7 +80,7 @@ def run_comparison_experiments():
 
     return df_results
 
-def run_model_case(p_val=150, n_tr=2000, n_te=200):
+def run_model_case(p_val=50, n_tr=2000, n_te=200):
     print(f"\n>>> Specific Case: p={p_val}, n_train={n_tr}, n_test={n_te} <<<")
     
     # --- 修改点：只接收 2 个返回值 (mixed_data 和 labels) ---
@@ -116,8 +116,8 @@ if __name__ == "__main__":
     print("\n" + "#"*60 + "\n[Step 1] Running Sensitivity Analysis Experiments\n" + "#"*60)
     df_results = run_comparison_experiments() 
     
-    # --- 2. 运行 p=150 特例 ---
-    print("\n" + "#"*60 + "\n[Step 2] Running High-Dim Special Case (p=150)\n" + "#"*60)
+    # --- 2. 运行 p=50 特例 ---
+    print("\n" + "#"*60 + "\n[Step 2] Running High-Dim Special Case (p=50)\n" + "#"*60)
     acc_150 = run_model_case(p_val=150, n_tr=2000, n_te=200)
     
     # --- 3. 数据整合与保存 ---
@@ -126,8 +126,8 @@ if __name__ == "__main__":
     
     # 将特例数据加入表格中作为一个特殊的 Type，方便对比
     special_row = pd.DataFrame([{
-        'Type': 'Special_Case_P150', 
-        'p_cts': 150, 
+        'Type': 'Special_Case_P50', 
+        'p_cts': 50, 
         'n_train': 2000, 
         'n_test': 200, 
         'Accuracy_Kernel': acc_150, 
