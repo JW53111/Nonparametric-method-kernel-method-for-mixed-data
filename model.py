@@ -15,41 +15,46 @@ from numba import njit
 # -----------------------------
 data_root = r"C:\Users\J\desktop\4th\Graduate-Project\Graduate-Project\UCI HAR Dataset"
 
-def load_har_mixed_dataset(split="train", n_samples=500, p_cts=20, step=3):
+def load_har_mixed_dataset(split="train", n_samples=None, p_cts=20, step=3):
     """
-    改进版数据加载：
-    1. 通过 step 间隔采样打破时间序列自相关性 (IID 假设)
-    2. 通过 StratifiedShuffleSplit 确保类别平衡
+    数据加载核心函数
+    split: "train" 或 "test"
+    n_samples: 需要的样本数。如果为 None，则加载该步长下的全部数据
+    p_cts: 使用多少个连续变量特征
+    step: 采样步长（用于 Ljung-Box 独立性检验）
     """
     base_path = os.path.join(data_root, split)
     
-    # --- 1. 加载所有标签和主体 ID ---
+    # --- 1. 读取基础标签与主体信息 ---
     y_full = pd.read_csv(os.path.join(base_path, f"y_{split}.txt"), header=None)[0].values
     subjects_full = pd.read_csv(os.path.join(base_path, f"subject_{split}.txt"), header=None)[0].values
     
-    # --- 2. IID 预处理：等间距跳点采样 ---
-    # 假设每秒 50Hz, 窗口 128 点，重叠 64 点。跳 3 个窗口约等于跳过 4 秒的数据
+    # --- 2. 步长采样 (解决时间相关性) ---
+    # indices_iid 是符合 step 间隔的所有原始索引
     indices_iid = np.arange(0, len(y_full), step)
     y_iid = y_full[indices_iid]
     
-    # --- 3. 分层抽样：确保 1-6 类分布均匀 ---
-    actual_n = min(n_samples, len(y_iid))
-    sss = StratifiedShuffleSplit(n_splits=1, train_size=actual_n, random_state=42)
+    # --- 3. 确定最终要提取的索引 ---
+    if n_samples is not None and n_samples < len(y_iid):
+        # 如果用户指定了更小的样本量，进行分层抽样以保证 1-6 类分布平衡
+        sss = StratifiedShuffleSplit(n_splits=1, train_size=n_samples, random_state=42)
+        # sss.split 需要一个占位用的 X (np.zeros)
+        rel_indices, _ = next(sss.split(np.zeros(len(y_iid)), y_iid))
+        final_indices = indices_iid[rel_indices]
+    else:
+        # 如果 n_samples 是 None 或者比可用数据还多，则使用该步长下的全部数据
+        final_indices = indices_iid
     
-    # 这里的 rel_indices 是相对于 indices_iid 的索引
-    rel_indices, _ = next(sss.split(np.zeros(len(y_iid)), y_iid))
-    # 映射回原始数据的全局索引
-    final_indices = indices_iid[rel_indices]
-    
-    # --- 4. 根据 final_indices 提取数据 ---
+    # --- 4. 提取标签、主体ID和连续变量 ---
     y_sampled = y_full[final_indices]
     subject_sampled = subjects_full[final_indices]
     
-    # 连续变量提取
+    # 加载 X 特征文件 (561维)
     X_cts_full = pd.read_csv(os.path.join(base_path, f"X_{split}.txt"), sep=r"\s+", header=None)
+    # 只取前 p_cts 列
     X_cts_sampled = X_cts_full.iloc[final_indices, :p_cts].values
     
-    # 函数型变量（惯性信号）提取
+    # --- 5. 提取函数型变量 (9路传感器信号) ---
     signal_names = [
         'total_acc_x', 'total_acc_y', 'total_acc_z', 
         'body_acc_x', 'body_acc_y', 'body_acc_z',
@@ -59,22 +64,24 @@ def load_har_mixed_dataset(split="train", n_samples=500, p_cts=20, step=3):
     X_fun_sampled = []
     for sig in signal_names:
         sig_path = os.path.join(base_path, "Inertial Signals", f"{sig}_{split}.txt")
-        # 优化：只读取需要的行，节省内存
+        # 直接读取整个信号文件
         sig_data = pd.read_csv(sig_path, sep=r"\s+", header=None).values
+        # 根据最终索引切片
         X_fun_sampled.append(sig_data[final_indices])
 
-    # --- 5. 组装成混合类型列表 ---
+    # --- 6. 组装混合数据结构 (List of Dicts) ---
     mixed_data_list = []
     for i in range(len(final_indices)):
         mixed_data_list.append({
-            'fun': [X_fun_sampled[j][i] for j in range(9)],
-            'cat': [subject_sampled[i]],
-            'cts': X_cts_sampled[i]
+            'fun': [X_fun_sampled[j][i] for j in range(9)], # 9条曲线
+            'cat': [subject_sampled[i]],                    # 1个类别（ID）
+            'cts': X_cts_sampled[i]                         # p个连续值
         })
         
-    print(f"--- data loading({split}) ---")
-    print(f"original: {len(y_full)} | IID : {len(y_iid)} | final samping: {actual_n}")
-    print(f"variable: 9 Functional, 1 Categorical, {p_cts} Continuous")
+    print(f"--- Data Load Report ({split}) ---")
+    print(f"Step size used: {step}")
+    print(f"Final samples extracted: {len(y_sampled)}")
+    print(f"Feature config: 9 Fun, 1 Cat, {p_cts} Cts")
     
     return mixed_data_list, y_sampled
 
