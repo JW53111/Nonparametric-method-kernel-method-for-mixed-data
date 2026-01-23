@@ -30,40 +30,32 @@ def load_har_mixed_dataset(split="train", n_samples=500, p_cts=20, step=3):
     # --- 2. IID 预处理：等间距跳点采样 ---
     # 假设每秒 50Hz, 窗口 128 点，重叠 64 点。跳 3 个窗口约等于跳过 4 秒的数据
     indices_iid = np.arange(0, len(y_full), step)
-    y_iid = y_full[indices_iid]
+    if n_samples is not None:
+        # 如果指定了样本数，进行分层抽样
+        actual_n = min(n_samples, len(indices_iid))
+        y_for_sss = y_full[indices_iid]
+        sss = StratifiedShuffleSplit(n_splits=1, train_size=actual_n, random_state=42)
+        rel_indices, _ = next(sss.split(np.zeros(len(y_for_sss)), y_for_sss))
+        final_indices = indices_iid[rel_indices]
+    else:
+        # 如果未指定，则使用该 step 下的所有数据
+        final_indices = indices_iid
     
-    # --- 3. 分层抽样：确保 1-6 类分布均匀 ---
-    actual_n = min(n_samples, len(y_iid))
-    sss = StratifiedShuffleSplit(n_splits=1, train_size=actual_n, random_state=42)
-    
-    # 这里的 rel_indices 是相对于 indices_iid 的索引
-    rel_indices, _ = next(sss.split(np.zeros(len(y_iid)), y_iid))
-    # 映射回原始数据的全局索引
-    final_indices = indices_iid[rel_indices]
-    
-    # --- 4. 根据 final_indices 提取数据 ---
     y_sampled = y_full[final_indices]
     subject_sampled = subjects_full[final_indices]
     
-    # 连续变量提取
+    # 加载连续变量
     X_cts_full = pd.read_csv(os.path.join(base_path, f"X_{split}.txt"), sep=r"\s+", header=None)
     X_cts_sampled = X_cts_full.iloc[final_indices, :p_cts].values
     
-    # 函数型变量（惯性信号）提取
-    signal_names = [
-        'total_acc_x', 'total_acc_y', 'total_acc_z', 
-        'body_acc_x', 'body_acc_y', 'body_acc_z',
-        'body_gyro_x', 'body_gyro_y', 'body_gyro_z'
-    ]
-    
+    # 加载函数型变量
+    signal_names = ['total_acc_x', 'total_acc_y', 'total_acc_z', 'body_acc_x', 'body_acc_y', 'body_acc_z', 'body_gyro_x', 'body_gyro_y', 'body_gyro_z']
     X_fun_sampled = []
     for sig in signal_names:
         sig_path = os.path.join(base_path, "Inertial Signals", f"{sig}_{split}.txt")
-        # 优化：只读取需要的行，节省内存
         sig_data = pd.read_csv(sig_path, sep=r"\s+", header=None).values
         X_fun_sampled.append(sig_data[final_indices])
 
-    # --- 5. 组装成混合类型列表 ---
     mixed_data_list = []
     for i in range(len(final_indices)):
         mixed_data_list.append({
@@ -71,11 +63,8 @@ def load_har_mixed_dataset(split="train", n_samples=500, p_cts=20, step=3):
             'cat': [subject_sampled[i]],
             'cts': X_cts_sampled[i]
         })
-        
-    print(f"--- data loading({split}) ---")
-    print(f"original: {len(y_full)} | IID : {len(y_iid)} | final samping: {actual_n}")
-    print(f"variable: 9 Functional, 1 Categorical, {p_cts} Continuous")
     
+    print(f"--- Data loaded ({split}, step={step}): Total {len(y_sampled)} samples ---")
     return mixed_data_list, y_sampled
 
 @njit
