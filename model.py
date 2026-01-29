@@ -13,77 +13,30 @@ from numba import njit
 # -----------------------------
 # 1️⃣ Load your dataset from local
 # -----------------------------
-data_root = r"C:\Users\J\desktop\4th\Graduate-Project\Graduate-Project\UCI HAR Dataset"
+data_root = r"C:\Users\J\desktop\4th\Graduate-Project\Integrated_HAR_Dataset"
 
-def load_har_mixed_dataset(split="train", n_samples=None, p_cts=20, step=3):
-    """
-    数据加载核心函数
-    split: "train" 或 "test"
-    n_samples: 需要的样本数。如果为 None，则加载该步长下的全部数据
-    p_cts: 使用多少个连续变量特征
-    step: 采样步长（用于 Ljung-Box 独立性检验）
-    """
+def load_har_mixed_dataset(split="train", p_cts=50):
     base_path = os.path.join(data_root, split)
     
-    # --- 1. 读取基础标签与主体信息 ---
-    y_full = pd.read_csv(os.path.join(base_path, f"y_{split}.txt"), header=None)[0].values
-    subjects_full = pd.read_csv(os.path.join(base_path, f"subject_{split}.txt"), header=None)[0].values
+    # 物理读取新生成的 TXT
+    y = pd.read_csv(os.path.join(base_path, f"y_{split}.txt"), header=None)[0].values
+    subject = pd.read_csv(os.path.join(base_path, f"subject_{split}.txt"), header=None)[0].values
+    X_cts = pd.read_csv(os.path.join(base_path, f"X_{split}.txt"), sep=r"\s+", header=None).iloc[:, :p_cts].values
     
-    # --- 2. 步长采样 (解决时间相关性) ---
-    # indices_iid 是符合 step 间隔的所有原始索引
-    indices_iid = np.arange(0, len(y_full), step)
-    y_iid = y_full[indices_iid]
-    
-    # --- 3. 确定最终要提取的索引 ---
-    if n_samples is not None and n_samples < len(y_iid):
-        # 如果用户指定了更小的样本量，进行分层抽样以保证 1-6 类分布平衡
-        sss = StratifiedShuffleSplit(n_splits=1, train_size=n_samples, random_state=42)
-        # sss.split 需要一个占位用的 X (np.zeros)
-        rel_indices, _ = next(sss.split(np.zeros(len(y_iid)), y_iid))
-        final_indices = indices_iid[rel_indices]
-    else:
-        # 如果 n_samples 是 None 或者比可用数据还多，则使用该步长下的全部数据
-        final_indices = indices_iid
-    
-    # --- 4. 提取标签、主体ID和连续变量 ---
-    y_sampled = y_full[final_indices]
-    subject_sampled = subjects_full[final_indices]
-    
-    # 加载 X 特征文件 (561维)
-    X_cts_full = pd.read_csv(os.path.join(base_path, f"X_{split}.txt"), sep=r"\s+", header=None)
-    # 只取前 p_cts 列
-    X_cts_sampled = X_cts_full.iloc[final_indices, :p_cts].values
-    
-    # --- 5. 提取函数型变量 (9路传感器信号) ---
-    signal_names = [
-        'total_acc_x', 'total_acc_y', 'total_acc_z', 
-        'body_acc_x', 'body_acc_y', 'body_acc_z',
-        'body_gyro_x', 'body_gyro_y', 'body_gyro_z'
-    ]
-    
-    X_fun_sampled = []
+    signal_names = ['total_acc_x', 'total_acc_y', 'total_acc_z', 'body_acc_x', 'body_acc_y', 'body_acc_z', 'body_gyro_x', 'body_gyro_y', 'body_gyro_z']
+    X_fun_list = []
     for sig in signal_names:
-        sig_path = os.path.join(base_path, "Inertial Signals", f"{sig}_{split}.txt")
-        # 直接读取整个信号文件
-        sig_data = pd.read_csv(sig_path, sep=r"\s+", header=None).values
-        # 根据最终索引切片
-        X_fun_sampled.append(sig_data[final_indices])
+        sig_data = pd.read_csv(os.path.join(base_path, "Inertial Signals", f"{sig}_{split}.txt"), sep=r"\s+", header=None).values
+        X_fun_list.append(sig_data)
 
-    # --- 6. 组装混合数据结构 (List of Dicts) ---
-    mixed_data_list = []
-    for i in range(len(final_indices)):
-        mixed_data_list.append({
-            'fun': [X_fun_sampled[j][i] for j in range(9)], # 9条曲线
-            'cat': [subject_sampled[i]],                    # 1个类别（ID）
-            'cts': X_cts_sampled[i]                         # p个连续值
+    mixed_data = []
+    for i in range(len(y)):
+        mixed_data.append({
+            'fun': [X_fun_list[j][i] for j in range(9)],
+            'cat': [subject[i]],
+            'cts': X_cts[i]
         })
-        
-    print(f"--- Data Load Report ({split}) ---")
-    print(f"Step size used: {step}")
-    print(f"Final samples extracted: {len(y_sampled)}")
-    print(f"Feature config: 9 Fun, 1 Cat, {p_cts} Cts")
-    
-    return mixed_data_list, y_sampled
+    return mixed_data, y
 
 @njit
 def fast_simpson_numba(y, dx):
