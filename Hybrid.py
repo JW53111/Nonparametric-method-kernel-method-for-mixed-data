@@ -25,9 +25,8 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
 
-# ==========================================
-# 1. Setting paths and parameters (alighed with Step-3 data)
-# ==========================================
+# Setting paths and parameters (alighed with Step-3 data)
+
 NEW_ROOT = "/Users/augleovo/PycharmProjects/PythonProject spline/.venv/bin/Integrated_HAR_Dataset_Sampled"
 M_SPLINE = 14
 # P_DIM is no longer used for splitting X_cts( only using for index calculations in plottig logic)
@@ -68,9 +67,8 @@ def load_har_for_hybrid(split="train"):
     return X_cts, X_fun, sub, y
 
 
-# ==========================================
-# 2. Run Hybrid Model (Standard Lasso + CV)
-# ==========================================
+
+# Run Hybrid Model (Standard Lasso + CV)
 
 def run_hybrid_final_reporting():
     print("--- Running Hybrid Standard Lasso (Reporting Mode - Full Features) ---")
