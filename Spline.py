@@ -11,9 +11,8 @@ B-spline:
 -Uses an elbow method to select the optimal number of B‑spline basis functions in training set
 -Compare Logistic Regression, Random Forest, and SVM via 5‑fold CV on training set
 -Full evaluation 
-
-
 """
+
 import numpy as np
 import pandas as pd
 import os
@@ -37,11 +36,11 @@ import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
 
-# ============== Setting path ==============
+# Setting path
 ORIGINAL_ROOT = "/Users/augleovo/PycharmProjects/PythonProject spline/.venv/bin/UCI HAR Dataset"
 NEW_ROOT = "/Users/augleovo/PycharmProjects/PythonProject spline/.venv/bin/Integrated_HAR_Dataset_Sampled"
 
-# ============== data processing ==============
+# data processing
 def save_to_uci_format(y, sub, cts, fun_dict, split_name):
     path = os.path.join(NEW_ROOT, split_name)
     inert_path = os.path.join(path, "Inertial Signals")
@@ -81,7 +80,7 @@ def preprocess_har_data():
         process_split("train")
         process_split("test")
 
-# ============== Load data ==============
+# Load data
 def load_har_data_base(split="train", n_samples=None, p_cts=50, random_state=42):
     base_path = NEW_ROOT
     y = pd.read_csv(f"{base_path}/{split}/y_{split}.txt", header=None, delim_whitespace=True)[0].values
@@ -104,7 +103,7 @@ def load_har_for_spline(split="train", n_samples=None, p_cts=50, random_state=42
         X_func[:, j, :] = data[final_indices]
     return {'X_func': X_func, 'X_cts': X_cts, 'y': y, 'time_grid': np.linspace(0, 1, 128)}
 
-# ============== n_basis selection (Figure 1) ==============
+# n_basis selection (Figure 1)
 def find_optimal_n_basis_with_viz(X_func, time_grid, degree=3, max_basis=25):
     np.random.seed(42)
     n_samples, n_signals, n_points = X_func.shape
@@ -137,7 +136,7 @@ def find_optimal_n_basis_with_viz(X_func, time_grid, degree=3, max_basis=25):
     plt.legend(); plt.grid(True, alpha=0.3); plt.tight_layout(); plt.show()
     return optimal_n
 
-# ============== extract spline features ==============
+# extract spline features
 def extract_spline_features_fixed(X_func, time_grid, n_basis, degree=3):
     n_samples, n_signals, n_points = X_func.shape
     n_internal_knots = max(1, n_basis - degree - 1)
@@ -155,7 +154,7 @@ def extract_spline_features_fixed(X_func, time_grid, n_basis, degree=3):
         spline_features[i, :] = sample_all_sigs
     return spline_features
 
-# ============== spline fitting Visualizations(figure 2 & 3) ==============
+# spline fitting Visualizations(figure 2 & 3)
 def plot_spline_fitting_example(X_func, time_grid, n_basis, degree=3, sample_idx=0, signal_ch=0):
     n_int = max(1, n_basis - degree - 1)
     knots = np.concatenate(([time_grid[0]]*(degree+1), np.linspace(time_grid[0], time_grid[-1], n_int+2)[1:-1], [time_grid[-1]]*(degree+1)))
@@ -189,7 +188,7 @@ def plot_spline_comparison(X_func, time_grid, n_basis_list, degree=3, sample_idx
     plt.xlabel('Normalized Time'); plt.ylabel('Acceleration'); plt.title('B-spline Fitting Comparison')
     plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.show()
 
-# ============== mutiple models comparison ==============
+# mutiple models comparison
 def compare_models_with_pipeline(X_train, y_train, X_test, y_test):
     models = {
         "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42, C=1.0),
@@ -228,7 +227,7 @@ def compare_models_with_pipeline(X_train, y_train, X_test, y_test):
         
     return pd.DataFrame(results), fitted_pipes
 
-# ============== Main process ==============
+# Main process
 def main():
     np.random.seed(42)
     overall_start = time.time()
@@ -261,17 +260,13 @@ def main():
 
 
 
-# === Inference Latency for best model ===
+# Inference Latency for best model
     best_model_name = results_df.loc[results_df['Test Acc'].idxmax()]['Model']
     best_pipe_for_timing = fitted_pipes[best_model_name]
     
     inf_start = time.time()
     _ = best_pipe_for_timing.predict(X_test_combined) # Run prediction
     inference_latency = time.time() - inf_start
-    # ===================================================
-
-
-
 
 
 
